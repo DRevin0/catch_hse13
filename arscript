@@ -1,0 +1,61 @@
+#!/bin/bash
+
+#проверка заполнения
+check_folder_usage() {
+    local folder_path="$1"
+    local threshold="$2"
+
+    local folder_size=$(du -sb "$folder_path" | awk '{print $1}')
+    local total_size=$(df -B1 "$folder_path" | awk 'NR==2 {print $2}')
+
+    local usage_precent=$((folder_size * 100 / total_size))
+
+    if [ "$usage_precent" -gt "$threshold" ]; then
+        echo "Папка $folder_path заполнена более чем на $threshold%."
+        return 0
+    else
+        echo "Папка $folder_path заполнена менее чем на $threshold%."
+        return 1
+    fi
+}
+
+
+#архивация и удаление
+archive_and_delete_folder() {
+    local folder_path="$1"
+    local backup_path="$2"
+    local threshold="$3"
+
+    if check_folder_usage "$folder_path" "$threshold"; then
+        while true; do
+            if ! check_folder_usage "$folder_path" "$threshold"; then
+                break
+            fi
+
+            oldest_file=$(find "$folder_path" -type f -printf '%T@ %p\n' | sort -n | head -1 | cut -d' ' -f2-)
+
+            if [ -z "$oldest_file" ]; then
+                break
+            fi
+
+            file_name=$(basename "$oldest_file")
+
+            tar -czf "$backup_path/$file_name.tar.gz" --transform 's|.*/||' "$oldest_file"
+
+            rm -f "$oldest_file"
+
+            echo "Файл $oldest_file был заархивирован и удален."
+        done
+
+        echo "Файлы из $folder_path были заархивированы и удалены."
+    else
+        echo "Папка $folder_path не требует архивации."
+    fi
+}
+
+
+read -p "Введите путь к папке: " folder_path
+read -p "Введите путь к папке для резервных копий: " backup_path
+read -p "Введите пороговое значение в процентах: " threshold
+
+archive_and_delete_folder "$folder_path" "$backup_path" "$threshold"
