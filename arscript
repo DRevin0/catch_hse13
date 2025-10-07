@@ -143,7 +143,8 @@ main() {
     local folder_path=""
     local backup_path=""
     local precent=70
-#обработка ввода пользователя
+    
+    #обработка ввода пользователя
     while [[ $# -gt 0 ]]; do
         case $1 in
             -f|--folder)
@@ -179,11 +180,12 @@ main() {
         
         #без порога - значение по умолчанию(70)
         if [ -n "$threshold_input" ]; then
-            threshold="$threshold_input"
+            precent="$threshold_input"
         fi
         
         echo "----------------------------------------"
     fi
+    
     #проверки обязательных параметров
     if [ -z "$folder_path" ] || [ -z "$backup_path" ]; then
         echo "Ошибка: необходимо указать пути к папкам"
