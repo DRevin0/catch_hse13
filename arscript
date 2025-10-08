@@ -90,6 +90,7 @@ archive_oldest_files() {
     local folder_path="$1"
     local backup_path="$2"
     local precent="$3"
+    local files_per_batch=3  # Количество файлов для архивации за один раз
 
     if [ -z "$(ls -A "$folder_path" 2>/dev/null)" ]; then
         echo "Папка $folder_path пуста, нечего архивировать"
@@ -109,26 +110,42 @@ archive_oldest_files() {
             break
         fi
 
-        #поиск старого файла
-        oldest_file=$(find "$folder_path" -maxdepth 1 -type f -printf '%T@ %p\n' | sort -n | head -1 | cut -d' ' -f2-)
-
-        if [ -z "$oldest_file" ]; then
+        #поиск 3 самых старых файлов
+        local oldest_files=$(find "$folder_path" -maxdepth 1 -type f -printf '%T@ %p\n' | sort -n | head -n $files_per_batch | awk '{print $2}')
+        
+        if [ -z "$oldest_files" ]; then
             break 
         fi
 
-        #создание имя архива с временем
+        #создание временного файла со списком файлов для архивации
+        local temp_file_list=$(mktemp)
+        echo "$oldest_files" > "$temp_file_list"
+        
+        #создание имени архива с временем
         local timestamp=$(date +"%Y%m%d_%H%M%S")
-        local file_name=$(basename "$oldest_file")
-        local archive_name="${file_name}_${timestamp}.tar.gz"
+        local archive_name="batch_${timestamp}.tar.gz"
         local archive_path="$backup_path/$archive_name"
         
-        #архивация
-        echo "Архивируем файл: $file_name в $archive_path"
-        tar -czf "$archive_path" -C "$(dirname "$oldest_file")" "$(basename "$oldest_file")"
-        
-        #удаление 
-        rm -f "$oldest_file"
-        echo "Удален файл: $oldest_file"
+        #архивация файлов из временного списка
+        echo "Архивируем $files_per_batch файлов в $archive_path"
+        if tar -czf "$archive_path" --files-from "$temp_file_list" 2>/dev/null; then
+            echo "Архив успешно создан"
+            
+            #удаление заархивированных файлов
+            while IFS= read -r file; do
+                if [ -n "$file" ] && [ -f "$file" ]; then
+                    rm -f "$file"
+                    echo "Удален файл: $file"
+                fi
+            done < "$temp_file_list"
+            
+            #очистка временного файла
+            rm -f "$temp_file_list"
+        else
+            echo "Ошибка при создании архива"
+            rm -f "$temp_file_list"
+            break
+        fi
         
         #проверка 
         if check_folder_usage "$folder_path" "$precent"; then
