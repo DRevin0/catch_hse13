@@ -12,23 +12,38 @@ check_folder_usage() {
         return 0
     fi
 
-    # Получаем размер папки и размер раздела, где она находится
+    # Получаем размер папки
     local folder_size=$(du -sb "$folder_path" 2>/dev/null | awk '{print $1}')
-    local mount_point=$(df -B1 "$folder_path" | awk 'NR==2 {print $6}')
-    local partition_size=$(df -B1 "$folder_path" | awk 'NR==2 {print $2}')
+    
+    # Получаем информацию о файловой системе через stat (более надежно)
+    local device_info
+    device_info=$(stat -f -c "%S %b %a" "$folder_path" 2>/dev/null)
+    
+    if [ -z "$device_info" ]; then
+        echo "Ошибка: не удалось получить информацию о файловой системе"
+        return 0
+    fi
+    
+    local block_size=$(echo "$device_info" | awk '{print $1}')
+    local total_blocks=$(echo "$device_info" | awk '{print $2}')
+    local available_blocks=$(echo "$device_info" | awk '{print $3}')
+    
+    local partition_size=$((block_size * total_blocks))
+    local mount_point=$(df -P "$folder_path" | awk 'NR==2 {print $6}')
     
     # Если папка пуста
     if [ -z "$folder_size" ] || [ "$folder_size" -eq 0 ]; then
         echo "Папка $folder_path пуста"
         echo "Размер папки: 0 байт"
-        echo "Размер раздела $mount_point: $partition_size байт"
+        echo "Раздел: $mount_point ($partition_size байт)"
         echo "Использование: 0%"
         return 0
     fi
 
     # Рассчитываем использование папки относительно раздела
     local usage_percent=$(echo "scale=2; ($folder_size * 100) / $partition_size" | bc)
-    local usage_rounded=$(printf "%.0f" "$usage_percent")
+    
+    local usage_rounded=$(echo "$usage_percent" | awk '{printf "%.0f", $1}' 2>/dev/null)
 
     echo "Папка: $folder_path"
     echo "Размер папки: $folder_size байт"
@@ -48,7 +63,7 @@ archive_oldest_files() {
     local folder_path="$1"
     local backup_path="$2"
     local precent="$3"
-    local files_per_batch=3  # Количество файлов для архивации за один раз
+    local files_per_batch=3
 
     if [ -z "$(ls -A "$folder_path" 2>/dev/null)" ]; then
         echo "Папка $folder_path пуста, нечего архивировать"
@@ -59,7 +74,6 @@ archive_oldest_files() {
         return 
     fi
 
-    #создать папку для бекапов, если не существует
     mkdir -p "$backup_path"
 
     while true; do
@@ -68,44 +82,45 @@ archive_oldest_files() {
             break
         fi
 
-        #поиск 3 самых старых файлов
-        local oldest_files=$(find "$folder_path" -maxdepth 1 -type f -printf '%T@ %p\n' | sort -n | head -n $files_per_batch | awk '{print $2}')
-        
-        if [ -z "$oldest_files" ]; then
-            break 
+        # Получаем список самых старых файлов
+        local oldest_files=()
+        while IFS= read -r -d '' file; do
+            oldest_files+=("$file")
+            [ ${#oldest_files[@]} -eq $files_per_batch ] && break
+        done < <(find "$folder_path" -maxdepth 1 -type f -printf '%T@ %p\0' 2>/dev/null | sort -n -z | cut -d' ' -f2-)
+
+        if [ ${#oldest_files[@]} -eq 0 ]; then
+            break
         fi
 
-        #создание временного файла со списком файлов для архивации
-        local temp_file_list=$(mktemp)
-        echo "$oldest_files" > "$temp_file_list"
-        
-        #создание имени архива с временем
         local timestamp=$(date +"%Y%m%d_%H%M%S")
         local archive_name="batch_${timestamp}.tar.gz"
         local archive_path="$backup_path/$archive_name"
         
-        #архивация файлов из временного списка
-        echo "Архивируем $files_per_batch файлов в $archive_path"
-        if tar -czf "$archive_path" --files-from "$temp_file_list" 2>/dev/null; then
+        echo "Архивируем ${#oldest_files[@]} файлов в $archive_path"
+        
+        # Переходим в папку чтобы использовать относительные пути
+        cd "$folder_path"
+        
+        # Архивируем файлы
+        if tar -czf "$archive_path" "${oldest_files[@]##*/}" 2>/dev/null; then
             echo "Архив успешно создан"
             
-            #удаление заархивированных файлов
-            while IFS= read -r file; do
-                if [ -n "$file" ] && [ -f "$file" ]; then
-                    rm -f "$file"
-                    echo "Удален файл: $file"
+            # Удаляем заархивированные файлы
+            for file in "${oldest_files[@]}"; do
+                local filename=$(basename "$file")
+                if [ -f "$filename" ]; then
+                    rm -f "$filename"
+                    echo "Удален файл: $filename"
                 fi
-            done < "$temp_file_list"
-            
-            #очистка временного файла
-            rm -f "$temp_file_list"
+            done
         else
             echo "Ошибка при создании архива"
-            rm -f "$temp_file_list"
-            break
         fi
         
-        #проверка 
+        cd - > /dev/null
+        
+        # Проверяем использование
         if check_folder_usage "$folder_path" "$precent"; then
             echo "Достигнуто целевое использование, остановка архивации"
             break
