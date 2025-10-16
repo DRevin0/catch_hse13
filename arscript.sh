@@ -1,62 +1,57 @@
 #!/bin/bash
 
-
-#функция для проверки сколько занимает папка относительно раздела диска
-check_folder_usage() {
+#Функция для проверки использования папки (возвращает процент)
+get_folder_usage() {
     local folder_path="$1"
-    local threshold="$2"
-
-    # Проверяем, существует ли папка
+    
     if [ ! -d "$folder_path" ]; then
-        echo "Ошибка: папка $folder_path не существует"
-        return 0
+        echo "0"
+        return
     fi
 
-    # Получаем размер папки
     local folder_size=$(du -sb "$folder_path" 2>/dev/null | awk '{print $1}')
+    local device_info=$(stat -f -c "%S %b %a" "$folder_path" 2>/dev/null 2>/dev/null)
     
-    # Получаем информацию о файловой системе через stat (более надежно)
-    local device_info
-    device_info=$(stat -f -c "%S %b %a" "$folder_path" 2>/dev/null)
-    
-    if [ -z "$device_info" ]; then
-        echo "Ошибка: не удалось получить информацию о файловой системе"
-        return 0
+    if [ -z "$device_info" ] || [ -z "$folder_size" ] || [ "$folder_size" -eq 0 ]; then
+        echo "0"
+        return
     fi
     
     local block_size=$(echo "$device_info" | awk '{print $1}')
     local total_blocks=$(echo "$device_info" | awk '{print $2}')
-    local available_blocks=$(echo "$device_info" | awk '{print $3}')
-    
     local partition_size=$((block_size * total_blocks))
-    local mount_point=$(df -P "$folder_path" | awk 'NR==2 {print $6}')
     
-    # Если папка пуста
-    if [ -z "$folder_size" ] || [ "$folder_size" -eq 0 ]; then
-        echo "Папка $folder_path пуста"
-        echo "Размер папки: 0 байт"
-        echo "Раздел: $mount_point ($partition_size байт)"
-        echo "Использование: 0%"
-        return 0
-    fi
-
-    # Рассчитываем использование папки относительно раздела
-    local usage_percent=$(echo "scale=2; ($folder_size * 100) / $partition_size" | bc)
+    local usage_percent=$(echo "scale=2; ($folder_size * 100) / $partition_size" | bc 2>/dev/null)
     
-    local usage_rounded=$(echo "$usage_percent" | awk '{printf "%.0f", $1}' 2>/dev/null)
+    #запятую на точку для bc
+    echo "$usage_percent" | tr ',' '.'
+}
 
-    echo "Папка: $folder_path"
-    echo "Размер папки: $folder_size байт"
-    echo "Раздел: $mount_point ($partition_size байт)"
-    echo "Заполнение папки: $usage_rounded%"
-
-    if (( $(echo "$usage_percent > $threshold" | bc -l) )); then
-        echo "Превышен порог в $threshold%."
-        return 1  
+#Функция для отображения прогресс-бара
+progress_bar() {
+    local current=$1
+    local total=$2
+    local usage=$3
+    local width=50
+    
+    #Если total = 0, избегаем деления на ноль
+    if [ $total -eq 0 ]; then
+        local percentage=0
+        local completed=0
+        local remaining=$width
     else
-        echo "Использование в пределах нормы."
-        return 0  
+        local percentage=$((current * 100 / total))
+        local completed=$((current * width / total))
+        local remaining=$((width - completed))
     fi
+    
+    #Форматируем использование до одного знака после запятой
+    local usage_formatted=$(echo "scale=1; $usage/1" | bc -l 2>/dev/null | tr -d '\n')
+    
+    printf "\r["
+    printf "%*s" $completed | tr ' ' '='
+    printf "%*s" $remaining | tr ' ' '-'
+    printf "] %3d%% файлов (%d/%d) | Использование: %s%%" $percentage $current $total "$usage_formatted"
 }
 
 archive_oldest_files() {
@@ -70,19 +65,39 @@ archive_oldest_files() {
         return
     fi
 
-    if check_folder_usage "$folder_path" "$precent"; then
-        return 
+    #Получаем общее количество файлов для прогресс-бара
+    local total_files=$(find "$folder_path" -maxdepth 1 -type f | wc -l)
+    local processed_files=0
+    
+    if [ $total_files -eq 0 ]; then
+        echo "В папке нет файлов для архивации"
+        return
     fi
+
+    echo "Начинаем процесс архивации..."
+    echo "Всего файлов для обработки: $total_files"
+    echo "Целевое использование: $precent%"
+    echo ""
 
     mkdir -p "$backup_path"
 
     while true; do
         if [ -z "$(ls -A "$folder_path" 2>/dev/null)" ]; then
-            echo "В папке больше нет файлов"
+            echo -e "\nВсе файлы обработаны"
             break
         fi
 
-        # Получаем список самых старых файлов
+        #Получаем текущее использование
+        local current_usage=$(get_folder_usage "$folder_path")
+        
+        #Проверяем, достигли ли процента
+        current_usage_fixed=$(echo "$current_usage" | tr ',' '.')
+        if (( $(echo "$current_usage_fixed <= $precent" | bc -l 2>/dev/null) )); then
+            echo -e "\nДостигнуто целевое использование ($current_usage% <= $precent%), остановка архивации"
+            break
+        fi
+
+        #Получаем список самых старых файлов
         local oldest_files=()
         while IFS= read -r -d '' file; do
             oldest_files+=("$file")
@@ -97,36 +112,42 @@ archive_oldest_files() {
         local archive_name="batch_${timestamp}.tar.gz"
         local archive_path="$backup_path/$archive_name"
         
-        echo "Архивируем ${#oldest_files[@]} файлов в $archive_path"
+        #обновляем прогресс-бар с текущим процентом использования
+        current_usage_fixed=$(echo "$current_usage" | tr ',' '.')
+        processed_files=$((processed_files + ${#oldest_files[@]}))
+        progress_bar $processed_files $total_files $current_usage_fixed
         
-        # Переходим в папку чтобы использовать относительные пути
+        #переходим в папку чтобы использовать относительные пути
         cd "$folder_path"
         
-        # Архивируем файлы
+        #архивируем файлы
         if tar -czf "$archive_path" "${oldest_files[@]##*/}" 2>/dev/null; then
-            echo "Архив успешно создан"
-            
-            # Удаляем заархивированные файлы
+            #удаляем заархивированные файлы
             for file in "${oldest_files[@]}"; do
                 local filename=$(basename "$file")
                 if [ -f "$filename" ]; then
                     rm -f "$filename"
-                    echo "Удален файл: $filename"
                 fi
             done
         else
-            echo "Ошибка при создании архива"
+            echo -e "\nОшибка при создании архива"
+            cd - > /dev/null
+            break
         fi
         
         cd - > /dev/null
         
-        # Проверяем использование
-        if check_folder_usage "$folder_path" "$precent"; then
-            echo "Достигнуто целевое использование, остановка архивации"
-            break
-        fi
+        #небольшая задержка для плавного обновления
+        sleep 0.1
     done
-    echo "Процесс архивации завершен"
+    
+    #финальное обновление прогресс-бара
+    local final_usage=$(get_folder_usage "$folder_path")
+    local final_usage_fixed=$(echo "$final_usage" | tr ',' '.')
+    progress_bar $processed_files $total_files $final_usage_fixed
+    echo -e "\n\nПроцесс архивации завершен"
+    echo "Обработано файлов: $processed_files из $total_files"
+    echo "Финальное использование: $final_usage%"
 }
 
 main() {
@@ -160,7 +181,8 @@ main() {
                 ;;
         esac
     done
-#если не указаны аргументы при вызове, запращиваем интерактивно
+
+    #если не указаны аргументы при вызове, запращиваем интерактивно
     if [ -z "$folder_path" ] || [ -z "$backup_path" ]; then
         echo "Аргументы не указаны. Введите данные вручную:"
         
@@ -195,12 +217,17 @@ main() {
     echo "Пороговое значение: $precent%"
     echo "----------------------------------------"
     
-    if check_folder_usage "$folder_path" "$precent"; then
-        echo "Папка не нуждается в очистке."
+    #проверяем начальное использование
+    local initial_usage=$(get_folder_usage "$folder_path")
+    echo "Текущее использование: $initial_usage%"
+    
+    if (( $(echo "$initial_usage <= $precent" | bc -l 2>/dev/null) )); then
+        echo "Папка не нуждается в очистке (использование в пределах нормы)."
     else
-        echo "Начинаем процесс архивации..."
+        echo "Начинаем процесс архивации для снижения использования до $precent%..."
         archive_oldest_files "$folder_path" "$backup_path" "$precent"
     fi
 }
+
 #запуск функции с аргументами командной строки
 main "$@"
