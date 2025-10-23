@@ -10,7 +10,7 @@ get_folder_usage() {
     fi
 
     local folder_size=$(du -sb "$folder_path" 2>/dev/null | awk '{print $1}')
-    local device_info=$(stat -f -c "%S %b %a" "$folder_path" 2>/dev/null 2>/dev/null)
+    local device_info=$(stat -f -c "%S %b %a" "$folder_path" 2>/dev/null)
     
     if [ -z "$device_info" ] || [ -z "$folder_size" ] || [ "$folder_size" -eq 0 ]; then
         echo "0"
